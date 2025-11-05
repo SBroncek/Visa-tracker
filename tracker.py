@@ -265,6 +265,7 @@ def render_html_grid(
         ".panel input[type=date]{padding:4px 6px} .panel .metric{font-size:13px;color:#333}\n"
         ".status-badge{padding:6px 10px;border-radius:999px;font-weight:700;color:#fff} \n"
         ".ok{background:#27ae60} .notok{background:#c0392b}\n"
+        ".plans{margin:10px 0;} .plans h3{margin:8px 0 6px 0;font-size:14px} .plans table{border-collapse:collapse;width:100%;max-width:760px} .plans th,.plans td{border-bottom:1px solid #eee;padding:4px 6px;font-size:12px;text-align:left} .plans input[type=date]{padding:2px 4px;font-size:12px} .plans button{padding:4px 8px;font-size:12px}\n"
         "</style>"
     )
     html_parts.append("</head><body>")
@@ -285,6 +286,9 @@ def render_html_grid(
                      "<button id='addPlan' type='button'>Add planned</button>"
                      "<button id='clearPlan' type='button'>Clear planned</button>"
                      "</div>")
+
+    # Planned ranges list container
+    html_parts.append("<div class='plans'><h3>Planned trips</h3><table id='plansTable'><thead><tr><th>#</th><th>Start</th><th>End</th><th>Days</th><th></th></tr></thead><tbody></tbody></table></div>")
 
     # Month header row
     month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
@@ -345,12 +349,20 @@ def render_html_grid(
         f"const maxDays = 180;\n"
         f"let flags = new Uint8Array([{flags_js}]);\n"
         f"let planned = new Uint8Array({total_days});\n"
+        "let plannedRanges = []; let nextPlanId = 1;\n"
         "function sumRange(arr, start, end){let s=0; for(let i=start;i<=end;i++){s+=arr[i]||0;} return s;}\n"
         "function worstWindow(){let n=flags.length;let best=0; for(let i=0;i<n;i++){let e=Math.min(n-1,i+windowDays-1); let sum=0; for(let j=i;j<=e;j++){sum+=(flags[j]||0) | (planned[j]||0);} if(sum>best) best=sum;} return best;}\n"
         "function remainingFrom(startIdx){let n=flags.length; let e=Math.min(n-1,startIdx+windowDays-1); let sum=0; for(let j=startIdx;j<=e;j++){sum+=(flags[j]||0) | (planned[j]||0);} return Math.max(0, maxDays - sum);}\n"
         "function idxFromDate(d){ return Math.floor((d - baseDate)/(24*3600*1000)); }\n"
         "function dateFromIdx(i){ return new Date(baseDate.getTime() + i*24*3600*1000); }\n"
         "function ensureSizeForDate(d){ const need = idxFromDate(d)+1; if(need>flags.length){ const nf = new Uint8Array(need); nf.set(flags); flags = nf; const np = new Uint8Array(need); np.set(planned); planned = np; } }\n"
+        "function recalcPlannedFromRanges(){ planned.fill(0); for(const r of plannedRanges){ for(let i=r.startIdx;i<=r.endIdx;i++){ if((flags[i]||0)!==1) planned[i]=1; } } }\n"
+        "function renderPlansTable(){ const tbody = document.querySelector('#plansTable tbody'); tbody.innerHTML=''; plannedRanges.sort((a,b)=>a.startIdx-b.startIdx); let i=1; for(const r of plannedRanges){ const tr=document.createElement('tr'); const sd = dateFromIdx(r.startIdx).toISOString().slice(0,10); const ed = dateFromIdx(r.endIdx).toISOString().slice(0,10); tr.innerHTML = `<td>${i}</td><td><input type='date' data-id='${r.id}' data-role='start' value='${sd}'></td><td><input type='date' data-id='${r.id}' data-role='end' value='${ed}'></td><td>${(r.endIdx-r.startIdx+1)}</td><td><button data-id='${r.id}' data-role='remove'>Remove</button></td>`; tbody.appendChild(tr); i++; } }\n"
+        "function attachPlansTableHandlers(){ const tbody = document.querySelector('#plansTable tbody'); tbody.addEventListener('input', (e)=>{ const t=e.target; if(!(t instanceof HTMLInputElement)) return; const id=parseInt(t.getAttribute('data-id')); const role=t.getAttribute('data-role'); const val=t.value; const r = plannedRanges.find(x=>x.id===id); if(!r||!val) return; const d=new Date(val); if(role==='start'){ r.startIdx = Math.min(r.endIdx, Math.max(0, idxFromDate(d))); } else if(role==='end'){ r.endIdx = Math.max(r.startIdx, Math.max(0, idxFromDate(d))); } recalcPlannedFromRanges(); const lastYear = computeLastRelevantYear(); ensureRenderedUntil(lastYear); trimRenderedTo(lastYear); applyClasses(); updateMetrics(); renderPlansTable(); }); tbody.addEventListener('click',(e)=>{ const btn = e.target.closest('button[data-role=remove]'); if(!btn) return; const id=parseInt(btn.getAttribute('data-id')); plannedRanges = plannedRanges.filter(x=>x.id!==id); recalcPlannedFromRanges(); const lastYear = computeLastRelevantYear(); trimRenderedTo(lastYear); applyClasses(); updateMetrics(); renderPlansTable(); }); }\n"
+        "function trimRenderedTo(year){ const outer = document.getElementById('outer'); let currentLast = parseInt(outer.getAttribute('data-last-year')); while(currentLast>year){\n"
+        "  for(let i=0;i<13;i++){ const lastChild = outer.lastElementChild; if(lastChild) outer.removeChild(lastChild); }\n"
+        "  currentLast -= 1; outer.setAttribute('data-last-year', String(currentLast));\n"
+        "} }\n"
         "function buildMonth(y,m,name){ const first = new Date(y, m-1, 1); const next = new Date(y, m, 1); const last = new Date(next - 24*3600*1000); const month = document.createElement('div'); month.className='month'; const title = document.createElement('div'); title.className='month-name'; title.textContent=name; const mini = document.createElement('div'); mini.className='mini'; const offset = (first.getDay()+6)%7; for(let i=0;i<offset;i++){ const e=document.createElement('div'); e.className='cell empty'; mini.appendChild(e);} for(let d=new Date(first); d<=last; d.setDate(d.getDate()+1)){ const idx = idxFromDate(d); const cell=document.createElement('div'); cell.className='cell empty'; cell.setAttribute('title', d.toISOString().slice(0,10)); if(d>=baseDate){ cell.setAttribute('data-idx', String(idx)); } mini.appendChild(cell);} month.appendChild(title); month.appendChild(mini); return month;}\n"
         "function appendYear(y){ const outer = document.getElementById('outer'); const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; const yearDiv = document.createElement('div'); yearDiv.className='year'; yearDiv.textContent=String(y); outer.appendChild(yearDiv); for(let m=1;m<=12;m++){ outer.appendChild(buildMonth(y,m,months[m-1])); } }\n"
         "function ensureRenderedUntil(year){ const outer = document.getElementById('outer'); const currentLastYear = parseInt(outer.getAttribute('data-last-year')); if(year<=currentLastYear) return; for(let y=currentLastYear+1; y<=year; y++){ appendYear(y); } outer.setAttribute('data-last-year', String(year)); }\n"
@@ -382,7 +394,11 @@ def render_html_grid(
         "  const i = parseInt(el.getAttribute('data-idx'));\n"
         "  if((flags[i]||0)===1) return; // cannot toggle base abroad\n"
         "  planned[i] = planned[i] ? 0 : 1;\n"
-        "  const lastYear = computeLastRelevantYear(); ensureRenderedUntil(lastYear);\n"
+        "  // sync plannedRanges to include this single day toggle as a 1-day range if turning on\n"
+        "  if(planned[i]){ plannedRanges.push({id: nextPlanId++, startIdx:i, endIdx:i}); } else { // turning off: split or shrink overlapping ranges\n"
+        "    const ranges=[]; for(const r of plannedRanges){ if(i<r.startIdx || i>r.endIdx){ ranges.push(r); } else { if(r.startIdx<i) ranges.push({id:r.id, startIdx:r.startIdx, endIdx:i-1}); if(i<r.endIdx) ranges.push({id:r.id, startIdx:i+1, endIdx:r.endIdx}); } } plannedRanges = ranges;\n"
+        "  }\n"
+        "  const lastYear = computeLastRelevantYear(); ensureRenderedUntil(lastYear); trimRenderedTo(lastYear);\n"
         "  applyClasses(); updateMetrics();\n"
         "});\n"
         "document.getElementById('qstart').addEventListener('change', updateMetrics);\n"
@@ -392,15 +408,17 @@ def render_html_grid(
         "  ensureSizeForDate(de);\n"
         "  const startIdx = Math.max(0, idxFromDate(ds));\n"
         "  const endIdx = idxFromDate(de);\n"
-        "  for(let i=startIdx;i<=endIdx;i++){ if((flags[i]||0)!==1) planned[i]=1; }\n"
-        "  const lastYear = computeLastRelevantYear(); ensureRenderedUntil(lastYear);\n"
+        "  plannedRanges.push({id: nextPlanId++, startIdx:startIdx, endIdx:endIdx});\n"
+        "  recalcPlannedFromRanges();\n"
+        "  const lastYear = computeLastRelevantYear(); ensureRenderedUntil(lastYear); trimRenderedTo(lastYear);\n"
         "  applyClasses(); updateMetrics();\n"
+        "  renderPlansTable();\n"
         "});\n"
         "document.getElementById('clearPlan').addEventListener('click', ()=>{\n"
-        "  planned.fill(0); applyClasses(); updateMetrics();\n"
+        "  plannedRanges = []; planned.fill(0); trimRenderedTo(computeLastRelevantYear()); applyClasses(); updateMetrics(); renderPlansTable();\n"
         "});\n"
         "window.addEventListener('resize', resizeCells); resizeCells();\n"
-        "applyClasses(); updateMetrics();\n"
+        "attachPlansTableHandlers(); renderPlansTable(); applyClasses(); updateMetrics();\n"
     )
     html_parts.append("</script>")
     html_parts.append("</body></html>")
