@@ -249,19 +249,21 @@ def render_html_grid(
         "body{font-family:system-ui,Segoe UI,Arial,sans-serif;padding:16px;}\n"
         ".legend{margin-bottom:12px} .legend span{display:inline-block;margin-right:12px}\n"
         ".sw{display:inline-block;width:12px;height:12px;margin-right:6px;vertical-align:middle;}\n"
-        ".sw.home{background:#2ecc71} .sw.abroad{background:#e74c3c} .sw.future{background:#111} .sw.planned{background:#f39c12} \n"
+        ".sw.home{background:#2ecc71} .sw.abroad{background:#e74c3c} .sw.future{background:#d9d9d9} .sw.planned{background:#f39c12} \n"
         ".outer{display:grid;grid-template-columns:80px repeat(12, 1fr);gap:8px;align-items:start;}\n"
         ".year{font-weight:700;align-self:center;}\n"
         ".month{border:1px solid #eee;padding:6px;border-radius:4px;}\n"
         ".month-name{font-size:12px;color:#333;margin-bottom:4px;text-align:center;}\n"
         ".mini{display:grid;grid-template-columns:repeat(7,var(--size));grid-auto-rows:var(--size);gap:var(--gap);justify-content:center;}\n"
         ".cell{width:var(--size);height:var(--size);}\n"
-        ".home{background:#2ecc71} .abroad{background:#e74c3c} .future{background:#111} .planned{background:#f39c12} \n"
+        ".home{background:#2ecc71} .abroad{background:#e74c3c} .future{background:#d9d9d9} .planned{background:#f39c12} \n"
         ".empty{background:transparent} \n"
         ".months-header{display:grid;grid-template-columns:80px repeat(12, 1fr);gap:8px;margin-bottom:6px;color:#555;font-size:12px;}\n"
         ".months-header div{ text-align:center }\n"
         ".panel{margin:12px 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap;}\n"
         ".panel input[type=date]{padding:4px 6px} .panel .metric{font-size:13px;color:#333}\n"
+        ".status-badge{padding:6px 10px;border-radius:999px;font-weight:700;color:#fff} \n"
+        ".ok{background:#27ae60} .notok{background:#c0392b}\n"
         "</style>"
     )
     html_parts.append("</head><body>")
@@ -274,10 +276,10 @@ def render_html_grid(
                      "</div>")
     # Interaction panel
     html_parts.append("<div class='panel'>"
+                     "<span id='status' class='status-badge ok'>COMPLIANT</span>"
+                     "<span class='metric' id='worst'></span>"
                      "<label>Query start: <input id='qstart' type='date'></label>"
                      "<span class='metric' id='remaining'></span>"
-                     "<span class='metric' id='worst'></span>"
-                     "<span class='metric' id='status'></span>"
                      "<label style='margin-left:12px'>Plan trip: <input id='pstart' type='date'> – <input id='pend' type='date'></label>"
                      "<button id='addPlan' type='button'>Add planned</button>"
                      "<button id='clearPlan' type='button'>Clear planned</button>"
@@ -285,13 +287,13 @@ def render_html_grid(
 
     # Month header row
     month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-    html_parts.append("<div class='months-header'>")
+    html_parts.append("<div class='months-header' id='monthsHeader'>")
     html_parts.append("<div></div>")  # placeholder over year column
     for m in month_names:
         html_parts.append(f"<div>{m}</div>")
     html_parts.append("</div>")
 
-    html_parts.append("<div class='outer'>")
+    html_parts.append(f"<div class='outer' id='outer' data-last-year='{years[-1]}'>")
     for y in years:
         # Year label
         html_parts.append(f"<div class='year'>{y}</div>")
@@ -337,26 +339,33 @@ def render_html_grid(
     html_parts.append("<script>")
     html_parts.append(
         f"const baseDate = new Date('{base_date.isoformat()}');\n"
-        f"const periodEnd = new Date('{period_end.isoformat()}');\n"
+        f"let periodEnd = new Date('{period_end.isoformat()}');\n"
         f"const windowDays = 365;\n"
         f"const maxDays = 180;\n"
-        f"const flags = new Uint8Array([{flags_js}]);\n"
-        f"const planned = new Uint8Array({total_days});\n"
+        f"let flags = new Uint8Array([{flags_js}]);\n"
+        f"let planned = new Uint8Array({total_days});\n"
         "function sumRange(arr, start, end){let s=0; for(let i=start;i<=end;i++){s+=arr[i]||0;} return s;}\n"
         "function worstWindow(){let n=flags.length;let best=0; for(let i=0;i<n;i++){let e=Math.min(n-1,i+windowDays-1); let sum=0; for(let j=i;j<=e;j++){sum+=(flags[j]||0) | (planned[j]||0);} if(sum>best) best=sum;} return best;}\n"
         "function remainingFrom(startIdx){let n=flags.length; let e=Math.min(n-1,startIdx+windowDays-1); let sum=0; for(let j=startIdx;j<=e;j++){sum+=(flags[j]||0) | (planned[j]||0);} return Math.max(0, maxDays - sum);}\n"
+        "function idxFromDate(d){ return Math.floor((d - baseDate)/(24*3600*1000)); }\n"
+        "function dateFromIdx(i){ return new Date(baseDate.getTime() + i*24*3600*1000); }\n"
+        "function ensureSizeForDate(d){ const need = idxFromDate(d)+1; if(need>flags.length){ const nf = new Uint8Array(need); nf.set(flags); flags = nf; const np = new Uint8Array(need); np.set(planned); planned = np; } }\n"
+        "function buildMonth(y,m,name){ const first = new Date(y, m-1, 1); const next = new Date(y, m, 1); const last = new Date(next - 24*3600*1000); const month = document.createElement('div'); month.className='month'; const title = document.createElement('div'); title.className='month-name'; title.textContent=name; const mini = document.createElement('div'); mini.className='mini'; const offset = (first.getDay()+6)%7; for(let i=0;i<offset;i++){ const e=document.createElement('div'); e.className='cell empty'; mini.appendChild(e);} for(let d=new Date(first); d<=last; d.setDate(d.getDate()+1)){ const idx = idxFromDate(d); const cell=document.createElement('div'); cell.className='cell empty'; cell.setAttribute('title', d.toISOString().slice(0,10)); if(d>=baseDate){ cell.setAttribute('data-idx', String(idx)); } mini.appendChild(cell);} month.appendChild(title); month.appendChild(mini); return month;}\n"
+        "function appendYear(y){ const outer = document.getElementById('outer'); const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; const yearDiv = document.createElement('div'); yearDiv.className='year'; yearDiv.textContent=String(y); outer.appendChild(yearDiv); for(let m=1;m<=12;m++){ outer.appendChild(buildMonth(y,m,months[m-1])); } }\n"
+        "function ensureRenderedUntil(year){ const outer = document.getElementById('outer'); const currentLastYear = parseInt(outer.getAttribute('data-last-year')); if(year<=currentLastYear) return; for(let y=currentLastYear+1; y<=year; y++){ appendYear(y); } outer.setAttribute('data-last-year', String(year)); }\n"
+        "function computeLastRelevantYear(){ let last = -1; for(let i=0;i<flags.length;i++){ if( (flags[i]|planned[i])===1) last = i; } if(last<0) return periodEnd.getFullYear(); const d = dateFromIdx(last); return Math.max(periodEnd.getFullYear(), d.getFullYear()+1); }\n"
         "function updateMetrics(){\n"
         "  const w = worstWindow();\n"
         "  document.getElementById('worst').textContent = `Worst 12-month: ${w} days`;\n"
-        "  document.getElementById('status').textContent = w>maxDays ? 'Status: NOT compliant' : 'Status: Compliant';\n"
+        "  const badge = document.getElementById('status'); const notok = w>maxDays; badge.textContent = notok ? 'NOT COMPLIANT' : 'COMPLIANT'; badge.className = 'status-badge ' + (notok ? 'notok' : 'ok');\n"
         "  const qs = document.getElementById('qstart').value;\n"
         "  if(qs){ const d = new Date(qs); const idx = Math.floor((d - baseDate)/(24*3600*1000)); if(idx>=0){ const rem = remainingFrom(idx); document.getElementById('remaining').textContent = `Remaining from ${qs}: ${rem}`; } }\n"
         "}\n"
         "function applyClasses(){\n"
         "  document.querySelectorAll('.cell[data-idx]').forEach(el => {\n"
         "    const i = parseInt(el.getAttribute('data-idx'));\n"
-        "    const abroad = flags[i]===1;\n"
-        "    const plan = planned[i]===1;\n"
+        "    const abroad = (flags[i]||0)===1;\n"
+        "    const plan = (planned[i]||0)===1;\n"
         "    let cls = 'home';\n"
         "    if(abroad){ cls = 'abroad'; } else if(plan){ cls = 'planned'; } else {\n"
         "      const d = new Date(baseDate.getTime() + i*24*3600*1000);\n"
@@ -366,25 +375,30 @@ def render_html_grid(
         "    el.className = 'cell ' + cls;\n"
         "  });\n"
         "}\n"
+        "function resizeCells(){ const outer = document.getElementById('outer'); const yearCol = 80; const gap = 8; const available = Math.max(0, outer.clientWidth - yearCol - (12-1)*gap); const monthWidth = Math.max(90, Math.floor(available/12)); const size = Math.max(8, Math.min(18, Math.floor((monthWidth - 12 - (7-1)*1)/7))); document.documentElement.style.setProperty('--size', size + 'px'); }\n"
         "document.addEventListener('click', (e)=>{\n"
         "  const el = e.target.closest('.cell[data-idx]'); if(!el) return;\n"
         "  const i = parseInt(el.getAttribute('data-idx'));\n"
-        "  if(flags[i]===1) return; // cannot toggle base abroad\n"
+        "  if((flags[i]||0)===1) return; // cannot toggle base abroad\n"
         "  planned[i] = planned[i] ? 0 : 1;\n"
+        "  const lastYear = computeLastRelevantYear(); ensureRenderedUntil(lastYear);\n"
         "  applyClasses(); updateMetrics();\n"
         "});\n"
         "document.getElementById('qstart').addEventListener('change', updateMetrics);\n"
         "document.getElementById('addPlan').addEventListener('click', ()=>{\n"
         "  const ps = document.getElementById('pstart').value; const pe = document.getElementById('pend').value; if(!ps||!pe) return;\n"
         "  const ds = new Date(ps); const de = new Date(pe); if(de<ds) return;\n"
-        "  const startIdx = Math.max(0, Math.floor((ds - baseDate)/(24*3600*1000)));\n"
-        "  const endIdx = Math.min(flags.length-1, Math.floor((de - baseDate)/(24*3600*1000)));\n"
-        "  for(let i=startIdx;i<=endIdx;i++){ if(flags[i]!==1) planned[i]=1; }\n"
+        "  ensureSizeForDate(de);\n"
+        "  const startIdx = Math.max(0, idxFromDate(ds));\n"
+        "  const endIdx = idxFromDate(de);\n"
+        "  for(let i=startIdx;i<=endIdx;i++){ if((flags[i]||0)!==1) planned[i]=1; }\n"
+        "  const lastYear = computeLastRelevantYear(); ensureRenderedUntil(lastYear);\n"
         "  applyClasses(); updateMetrics();\n"
         "});\n"
         "document.getElementById('clearPlan').addEventListener('click', ()=>{\n"
         "  planned.fill(0); applyClasses(); updateMetrics();\n"
         "});\n"
+        "window.addEventListener('resize', resizeCells); resizeCells();\n"
         "applyClasses(); updateMetrics();\n"
     )
     html_parts.append("</script>")
@@ -622,22 +636,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.visualize == "terminal":
             render_terminal_grid(flags, base, period[1], today)
         elif args.visualize == "html":
-            # Decide output filename: if default name, create a contextual, timestamped name
+            # Overwrite default output by default; only uniquify when a custom name is given and --overwrite is not set
             desired = args.html_out
-            if desired == "abroad_days.html":
-                base_name = f"abroad_{period[0].isoformat()}_{period[1].isoformat()}"
-                if planned is not None:
-                    plan_len = (planned.end - planned.start).days + 1
-                    base_name += f"_plan-{planned.start.isoformat()}-{plan_len}d"
-                if args.query_start:
-                    try:
-                        qd = parse_date(args.query_start)
-                        base_name += f"_query-{qd.isoformat()}"
-                    except Exception:
-                        pass
-                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                desired = f"{base_name}_{timestamp}.html"
-            if not args.overwrite:
+            if desired != "abroad_days.html" and not args.overwrite:
                 desired = ensure_unique_path(desired)
             render_html_grid(flags, base, period[1], today, desired)
             print(f"Wrote HTML visualization to {desired}")
