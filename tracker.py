@@ -231,14 +231,15 @@ def render_html_grid(
             return "future"
         return "home"
 
-    # Determine years and months within period; extend to one year after last abroad day
+    # Determine years to render initially: only years with non-future days (green or red)
+    # or years containing recorded abroad days (even if in the future). Do not add +1.
     last_abroad_idx = -1
     for i, v in enumerate(flags):
         if v == 1:
             last_abroad_idx = i
-    last_abroad_year = (base_date + timedelta(days=last_abroad_idx)).year if last_abroad_idx >= 0 else period_end.year
-    end_year = max(period_end.year, last_abroad_year + 1)
-    years = list(range(base_date.year, end_year + 1))
+    last_abroad_year = (base_date + timedelta(days=last_abroad_idx)).year if last_abroad_idx >= 0 else base_date.year
+    initial_end_year = max(min(period_end.year, today.year), last_abroad_year)
+    years = list(range(base_date.year, initial_end_year + 1))
 
     html_parts: List[str] = []
     html_parts.append("<!DOCTYPE html><html><head><meta charset='utf-8'>")
@@ -353,7 +354,7 @@ def render_html_grid(
         "function buildMonth(y,m,name){ const first = new Date(y, m-1, 1); const next = new Date(y, m, 1); const last = new Date(next - 24*3600*1000); const month = document.createElement('div'); month.className='month'; const title = document.createElement('div'); title.className='month-name'; title.textContent=name; const mini = document.createElement('div'); mini.className='mini'; const offset = (first.getDay()+6)%7; for(let i=0;i<offset;i++){ const e=document.createElement('div'); e.className='cell empty'; mini.appendChild(e);} for(let d=new Date(first); d<=last; d.setDate(d.getDate()+1)){ const idx = idxFromDate(d); const cell=document.createElement('div'); cell.className='cell empty'; cell.setAttribute('title', d.toISOString().slice(0,10)); if(d>=baseDate){ cell.setAttribute('data-idx', String(idx)); } mini.appendChild(cell);} month.appendChild(title); month.appendChild(mini); return month;}\n"
         "function appendYear(y){ const outer = document.getElementById('outer'); const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; const yearDiv = document.createElement('div'); yearDiv.className='year'; yearDiv.textContent=String(y); outer.appendChild(yearDiv); for(let m=1;m<=12;m++){ outer.appendChild(buildMonth(y,m,months[m-1])); } }\n"
         "function ensureRenderedUntil(year){ const outer = document.getElementById('outer'); const currentLastYear = parseInt(outer.getAttribute('data-last-year')); if(year<=currentLastYear) return; for(let y=currentLastYear+1; y<=year; y++){ appendYear(y); } outer.setAttribute('data-last-year', String(year)); }\n"
-        "function computeLastRelevantYear(){ let last = -1; for(let i=0;i<flags.length;i++){ if( (flags[i]|planned[i])===1) last = i; } if(last<0) return periodEnd.getFullYear(); const d = dateFromIdx(last); return Math.max(periodEnd.getFullYear(), d.getFullYear()+1); }\n"
+        "function computeLastRelevantYear(){ let last = -1; for(let i=0;i<flags.length;i++){ if( (flags[i]|planned[i])===1) last = i; } if(last<0) return Math.min(periodEnd.getFullYear(), new Date().getFullYear()); const d = dateFromIdx(last); return Math.max(Math.min(periodEnd.getFullYear(), new Date().getFullYear()), d.getFullYear()); }\n"
         "function updateMetrics(){\n"
         "  const w = worstWindow();\n"
         "  document.getElementById('worst').textContent = `Worst 12-month: ${w} days`;\n"
