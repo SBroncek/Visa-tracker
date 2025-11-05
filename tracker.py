@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
+import webbrowser
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -84,6 +86,17 @@ def build_abroad_day_flags(trips: Sequence[Trip], period: Period) -> Tuple[List[
     return flags, p_start
 
 
+def sum_in_window(flags: Sequence[int], start_index: int, window_days: int) -> int:
+    n = len(flags)
+    if n == 0:
+        return 0
+    end = min(start_index + window_days - 1, n - 1)
+    prefix = [0] * (n + 1)
+    for i, v in enumerate(flags):
+        prefix[i + 1] = prefix[i] + v
+    return prefix[end + 1] - prefix[start_index]
+
+
 def rolling_window_violations(
     abroad_flags: Sequence[int],
     window_days: int,
@@ -135,6 +148,181 @@ def check_abroad_days(
         humanized.append((base + timedelta(days=si), base + timedelta(days=ei), days_in_window))
 
     return (len(humanized) == 0), humanized
+
+
+# ---------- Visualization ----------
+
+def render_terminal_grid(
+    flags: Sequence[int],
+    base_date: date,
+    period_end: date,
+    today: date,
+) -> None:
+    """Render a simple month-by-month grid in the terminal.
+
+    Uses colored squares (ANSI) per day:
+    - green: not abroad
+    - red: abroad
+    - black: future (after today)
+    """
+    # ANSI colors
+    RED = "\x1b[41m\x1b[30m"  # red bg, black text
+    GREEN = "\x1b[42m\x1b[30m"
+    BLACK = "\x1b[40m\x1b[37m"
+    RESET = "\x1b[0m"
+
+    # Iterate months
+    cur = date(base_date.year, base_date.month, 1)
+    while cur <= period_end:
+        # Determine month range within assessment
+        next_month = (cur.replace(day=28) + timedelta(days=4)).replace(day=1)
+        month_start = max(cur, base_date)
+        month_end = min(next_month - timedelta(days=1), period_end)
+        # Header
+        print(f"\n{cur.strftime('%B %Y')}")
+        # Weekday header
+        print("Mo Tu We Th Fr Sa Su")
+        # Leading spaces
+        first_weekday = (month_start.weekday() + 1) % 7  # Monday=0 -> Monday=1 style
+        # Compute column offset: Monday=0..Sunday=6
+        monday_based = month_start.weekday()  # 0..6
+        col = monday_based
+        # Print leading blanks
+        if month_start.day != 1:
+            # Need to align to the correct weekday for day 1
+            first_of_month = month_start.replace(day=1)
+            col = first_of_month.weekday()
+            print("   " * col, end="")
+        else:
+            print("   " * col, end="")
+
+        d = month_start
+        while d <= month_end:
+            idx = (d - base_date).days
+            # choose color
+            if d > today:
+                color = BLACK
+            else:
+                color = RED if flags[idx] == 1 else GREEN
+            # print two-char day as colored block with day number
+            print(f"{color}{d.day:02d}{RESET} ", end="")
+            if d.weekday() == 6:  # Sunday -> newline
+                print()
+            d += timedelta(days=1)
+        print()
+        cur = next_month
+
+
+def render_html_grid(
+    flags: Sequence[int],
+    base_date: date,
+    period_end: date,
+    today: date,
+    out_path: str,
+) -> None:
+    """Write an HTML with rows per year and columns per month; each cell shows a mini calendar."""
+
+    def cell_class(d: date) -> str:
+        if d > today:
+            return "future"
+        idx = (d - base_date).days
+        return "abroad" if flags[idx] == 1 else "home"
+
+    # Determine years and months within period
+    years = list(range(base_date.year, period_end.year + 1))
+
+    html_parts: List[str] = []
+    html_parts.append("<!DOCTYPE html><html><head><meta charset='utf-8'>")
+    html_parts.append("<title>Abroad Days Grid</title>")
+    html_parts.append(
+        "<style>\n"
+        ":root{--size:12px;--gap:1px;}\n"
+        "body{font-family:system-ui,Segoe UI,Arial,sans-serif;padding:16px;}\n"
+        ".legend{margin-bottom:12px} .legend span{display:inline-block;margin-right:12px}\n"
+        ".sw{display:inline-block;width:12px;height:12px;margin-right:6px;vertical-align:middle;}\n"
+        ".sw.home{background:#2ecc71} .sw.abroad{background:#e74c3c} .sw.future{background:#111} \n"
+        ".outer{display:grid;grid-template-columns:80px repeat(12, 1fr);gap:8px;align-items:start;}\n"
+        ".year{font-weight:700;align-self:center;}\n"
+        ".month{border:1px solid #eee;padding:6px;border-radius:4px;}\n"
+        ".month-name{font-size:12px;color:#333;margin-bottom:4px;text-align:center;}\n"
+        ".mini{display:grid;grid-template-columns:repeat(7,var(--size));grid-auto-rows:var(--size);gap:var(--gap);justify-content:center;}\n"
+        ".cell{width:var(--size);height:var(--size);}\n"
+        ".home{background:#2ecc71} .abroad{background:#e74c3c} .future{background:#111} \n"
+        ".empty{background:transparent} \n"
+        ".months-header{display:grid;grid-template-columns:80px repeat(12, 1fr);gap:8px;margin-bottom:6px;color:#555;font-size:12px;}\n"
+        ".months-header div{ text-align:center }\n"
+        "</style>"
+    )
+    html_parts.append("</head><body>")
+    html_parts.append("<h2>Abroad Days</h2>")
+    html_parts.append("<div class='legend'>"
+                     "<span><span class='sw home'></span>Home</span>"
+                     "<span><span class='sw abroad'></span>Abroad</span>"
+                     "<span><span class='sw future'></span>Future</span>"
+                     "</div>")
+
+    # Month header row
+    month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    html_parts.append("<div class='months-header'>")
+    html_parts.append("<div></div>")  # placeholder over year column
+    for m in month_names:
+        html_parts.append(f"<div>{m}</div>")
+    html_parts.append("</div>")
+
+    html_parts.append("<div class='outer'>")
+    for y in years:
+        # Year label
+        html_parts.append(f"<div class='year'>{y}</div>")
+        # 12 months
+        for m in range(1, 13):
+            # Month boundaries
+            first_of_month = date(y, m, 1)
+            next_month = (first_of_month.replace(day=28) + timedelta(days=4)).replace(day=1)
+            last_of_month = next_month - timedelta(days=1)
+            # Determine overlap with assessment period
+            if last_of_month < base_date or first_of_month > period_end:
+                # outside period -> render empty cell
+                html_parts.append("<div class='month'></div>")
+                continue
+            month_start = max(first_of_month, base_date)
+            month_end = min(last_of_month, period_end)
+
+            html_parts.append("<div class='month'>")
+            html_parts.append(f"<div class='month-name'>{first_of_month.strftime('%b')}</div>")
+            html_parts.append("<div class='mini'>")
+            # Leading blanks to align first day of the month to weekday (Mon=0)
+            col_offset = first_of_month.weekday()
+            for _ in range(col_offset):
+                html_parts.append("<div class='cell empty'></div>")
+            # Days of the month (full month rendered, but only color within period)
+            d = first_of_month
+            while d <= last_of_month:
+                cls = "empty"
+                if base_date <= d <= period_end:
+                    cls = cell_class(d)
+                html_parts.append(f"<div class='cell {cls}' title='{d.isoformat()}'></div>")
+                d += timedelta(days=1)
+            html_parts.append("</div>")  # mini
+            html_parts.append("</div>")  # month
+    html_parts.append("</div>")  # outer
+
+    html_parts.append("</body></html>")
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("".join(html_parts))
+
+
+def ensure_unique_path(desired_path: str) -> str:
+    """If desired_path exists, append an incrementing suffix before extension."""
+    if not os.path.exists(desired_path):
+        return desired_path
+    root, ext = os.path.splitext(desired_path)
+    i = 1
+    while True:
+        candidate = f"{root}_{i}{ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        i += 1
 
 
 # ---------- IO Helpers ----------
@@ -239,6 +427,51 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=180,
         help="Max allowed abroad days within any window. Default: 180",
     )
+    parser.add_argument(
+        "--visualize",
+        dest="visualize",
+        choices=["none", "terminal", "html"],
+        default="none",
+        help="Produce a visualization: 'terminal' or 'html' (writes --html-out)",
+    )
+    parser.add_argument(
+        "--html-out",
+        dest="html_out",
+        default="abroad_days.html",
+        help="Output path for HTML visualization (when --visualize html)",
+    )
+    parser.add_argument(
+        "--open-html",
+        dest="open_html",
+        action="store_true",
+        help="Open generated HTML in the default browser",
+    )
+    parser.add_argument(
+        "--overwrite",
+        dest="overwrite",
+        action="store_true",
+        help="Allow overwriting existing HTML output file",
+    )
+    # Planned trip
+    parser.add_argument("--plan-start", dest="plan_start", help="Planned trip start date (YYYY-MM-DD)")
+    parser.add_argument("--plan-end", dest="plan_end", help="Planned trip end date (YYYY-MM-DD)")
+    parser.add_argument(
+        "--plan-length",
+        dest="plan_length",
+        type=int,
+        help="Planned trip length in days (inclusive). Use with --plan-start (or --plan-from)",
+    )
+    parser.add_argument(
+        "--plan-from",
+        dest="plan_from",
+        help="When using --plan-length without --plan-start, start from this date (default: today)",
+    )
+    # Remaining days query
+    parser.add_argument(
+        "--query-start",
+        dest="query_start",
+        help="Start date of a 12-month window to compute remaining allowed days",
+    )
 
     args = parser.parse_args(argv)
 
@@ -251,6 +484,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         trips = read_trips_interactive()
 
+    # Apply planned trip if provided
+    planned: Optional[Trip] = None
+    if args.plan_start and args.plan_end:
+        planned = Trip(parse_date(args.plan_start), parse_date(args.plan_end))
+    elif args.plan_length is not None:
+        if args.plan_start:
+            start_planned = parse_date(args.plan_start)
+        else:
+            start_planned = parse_date(args.plan_from) if args.plan_from else date.today()
+        planned = Trip(start_planned, start_planned + timedelta(days=max(0, args.plan_length - 1)))
+    if planned is not None:
+        trips = list(trips) + [planned]
+
     is_ok, violations = check_abroad_days(
         trips=trips,
         assessment_period=period,
@@ -260,16 +506,66 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if is_ok:
         print("Compliant: No 12-month window exceeds the allowed abroad days.")
-        return 0
+    else:
+        print("NOT compliant: Some 12-month windows exceed the allowed abroad days.")
+        # Show up to 10 violating windows, with the worst first
+        violations_sorted = sorted(violations, key=lambda w: w[2], reverse=True)
+        limit = min(10, len(violations_sorted))
+        print(f"Top {limit} violating windows (start to end: days_abroad):")
+        for ws, we, days in violations_sorted[:limit]:
+            print(f"- {ws.isoformat()} to {we.isoformat()}: {days} days")
 
-    print("NOT compliant: Some 12-month windows exceed the allowed abroad days.")
-    # Show up to 10 violating windows, with the worst first
-    violations_sorted = sorted(violations, key=lambda w: w[2], reverse=True)
-    limit = min(10, len(violations_sorted))
-    print(f"Top {limit} violating windows (start to end: days_abroad):")
-    for ws, we, days in violations_sorted[:limit]:
-        print(f"- {ws.isoformat()} to {we.isoformat()}: {days} days")
-    return 2
+    # Remaining days query
+    if args.query_start:
+        q_start = parse_date(args.query_start)
+        window_days = args.window_days
+        # Build flags for the whole period (with planned if any)
+        clamped = [t for t in (clamp_trip_to_period(t, period) for t in trips) if t]
+        merged = merge_overlapping_trips(clamped)
+        flags, base = build_abroad_day_flags(merged, period)
+        if q_start < base:
+            q_start = base
+        q_end = min(q_start + timedelta(days=window_days - 1), period[1])
+        si = (q_start - base).days
+        abroad_in_q = sum_in_window(flags, si, window_days)
+        remaining = max(0, args.max_days - abroad_in_q)
+        print(f"Remaining allowed abroad days from {q_start.isoformat()} to {q_end.isoformat()}: {remaining}")
+
+    # Visualization
+    if args.visualize != "none":
+        clamped = [t for t in (clamp_trip_to_period(t, period) for t in trips) if t]
+        merged = merge_overlapping_trips(clamped)
+        flags, base = build_abroad_day_flags(merged, period)
+        today = date.today()
+        if args.visualize == "terminal":
+            render_terminal_grid(flags, base, period[1], today)
+        elif args.visualize == "html":
+            # Decide output filename: if default name, create a contextual, timestamped name
+            desired = args.html_out
+            if desired == "abroad_days.html":
+                base_name = f"abroad_{period[0].isoformat()}_{period[1].isoformat()}"
+                if planned is not None:
+                    plan_len = (planned.end - planned.start).days + 1
+                    base_name += f"_plan-{planned.start.isoformat()}-{plan_len}d"
+                if args.query_start:
+                    try:
+                        qd = parse_date(args.query_start)
+                        base_name += f"_query-{qd.isoformat()}"
+                    except Exception:
+                        pass
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                desired = f"{base_name}_{timestamp}.html"
+            if not args.overwrite:
+                desired = ensure_unique_path(desired)
+            render_html_grid(flags, base, period[1], today, desired)
+            print(f"Wrote HTML visualization to {desired}")
+            if args.open_html:
+                try:
+                    webbrowser.open(desired)
+                except Exception:
+                    pass
+
+    return 0 if is_ok else 2
 
 
 if __name__ == "__main__":
