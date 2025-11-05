@@ -223,13 +223,22 @@ def render_html_grid(
     """Write an HTML with rows per year and columns per month; each cell shows a mini calendar."""
 
     def cell_class(d: date) -> str:
+        idx = (d - base_date).days
+        is_abroad = flags[idx] == 1 if 0 <= idx < len(flags) else False
+        if is_abroad:
+            return "abroad"  # future abroad should still be red
         if d > today:
             return "future"
-        idx = (d - base_date).days
-        return "abroad" if flags[idx] == 1 else "home"
+        return "home"
 
-    # Determine years and months within period
-    years = list(range(base_date.year, period_end.year + 1))
+    # Determine years and months within period; extend to one year after last abroad day
+    last_abroad_idx = -1
+    for i, v in enumerate(flags):
+        if v == 1:
+            last_abroad_idx = i
+    last_abroad_year = (base_date + timedelta(days=last_abroad_idx)).year if last_abroad_idx >= 0 else period_end.year
+    end_year = max(period_end.year, last_abroad_year + 1)
+    years = list(range(base_date.year, end_year + 1))
 
     html_parts: List[str] = []
     html_parts.append("<!DOCTYPE html><html><head><meta charset='utf-8'>")
@@ -240,17 +249,19 @@ def render_html_grid(
         "body{font-family:system-ui,Segoe UI,Arial,sans-serif;padding:16px;}\n"
         ".legend{margin-bottom:12px} .legend span{display:inline-block;margin-right:12px}\n"
         ".sw{display:inline-block;width:12px;height:12px;margin-right:6px;vertical-align:middle;}\n"
-        ".sw.home{background:#2ecc71} .sw.abroad{background:#e74c3c} .sw.future{background:#111} \n"
+        ".sw.home{background:#2ecc71} .sw.abroad{background:#e74c3c} .sw.future{background:#111} .sw.planned{background:#f39c12} \n"
         ".outer{display:grid;grid-template-columns:80px repeat(12, 1fr);gap:8px;align-items:start;}\n"
         ".year{font-weight:700;align-self:center;}\n"
         ".month{border:1px solid #eee;padding:6px;border-radius:4px;}\n"
         ".month-name{font-size:12px;color:#333;margin-bottom:4px;text-align:center;}\n"
         ".mini{display:grid;grid-template-columns:repeat(7,var(--size));grid-auto-rows:var(--size);gap:var(--gap);justify-content:center;}\n"
         ".cell{width:var(--size);height:var(--size);}\n"
-        ".home{background:#2ecc71} .abroad{background:#e74c3c} .future{background:#111} \n"
+        ".home{background:#2ecc71} .abroad{background:#e74c3c} .future{background:#111} .planned{background:#f39c12} \n"
         ".empty{background:transparent} \n"
         ".months-header{display:grid;grid-template-columns:80px repeat(12, 1fr);gap:8px;margin-bottom:6px;color:#555;font-size:12px;}\n"
         ".months-header div{ text-align:center }\n"
+        ".panel{margin:12px 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap;}\n"
+        ".panel input[type=date]{padding:4px 6px} .panel .metric{font-size:13px;color:#333}\n"
         "</style>"
     )
     html_parts.append("</head><body>")
@@ -258,7 +269,18 @@ def render_html_grid(
     html_parts.append("<div class='legend'>"
                      "<span><span class='sw home'></span>Home</span>"
                      "<span><span class='sw abroad'></span>Abroad</span>"
-                     "<span><span class='sw future'></span>Future</span>"
+                     "<span><span class='sw planned'></span>Planned</span>"
+                     "<span><span class='sw future'></span>Future (home)</span>"
+                     "</div>")
+    # Interaction panel
+    html_parts.append("<div class='panel'>"
+                     "<label>Query start: <input id='qstart' type='date'></label>"
+                     "<span class='metric' id='remaining'></span>"
+                     "<span class='metric' id='worst'></span>"
+                     "<span class='metric' id='status'></span>"
+                     "<label style='margin-left:12px'>Plan trip: <input id='pstart' type='date'> – <input id='pend' type='date'></label>"
+                     "<button id='addPlan' type='button'>Add planned</button>"
+                     "<button id='clearPlan' type='button'>Clear planned</button>"
                      "</div>")
 
     # Month header row
@@ -300,12 +322,72 @@ def render_html_grid(
                 cls = "empty"
                 if base_date <= d <= period_end:
                     cls = cell_class(d)
-                html_parts.append(f"<div class='cell {cls}' title='{d.isoformat()}'></div>")
+                    idx = (d - base_date).days
+                    html_parts.append(f"<div class='cell {cls}' data-idx='{idx}' title='{d.isoformat()}'></div>")
+                else:
+                    html_parts.append("<div class='cell empty'></div>")
                 d += timedelta(days=1)
             html_parts.append("</div>")  # mini
             html_parts.append("</div>")  # month
     html_parts.append("</div>")  # outer
 
+    # Embed data and JS for interactivity
+    total_days = (period_end - base_date).days + 1
+    flags_js = ",".join(str(int(v)) for v in flags)
+    html_parts.append("<script>")
+    html_parts.append(
+        f"const baseDate = new Date('{base_date.isoformat()}');\n"
+        f"const periodEnd = new Date('{period_end.isoformat()}');\n"
+        f"const windowDays = 365;\n"
+        f"const maxDays = 180;\n"
+        f"const flags = new Uint8Array([{flags_js}]);\n"
+        f"const planned = new Uint8Array({total_days});\n"
+        "function sumRange(arr, start, end){let s=0; for(let i=start;i<=end;i++){s+=arr[i]||0;} return s;}\n"
+        "function worstWindow(){let n=flags.length;let best=0; for(let i=0;i<n;i++){let e=Math.min(n-1,i+windowDays-1); let sum=0; for(let j=i;j<=e;j++){sum+=(flags[j]||0) | (planned[j]||0);} if(sum>best) best=sum;} return best;}\n"
+        "function remainingFrom(startIdx){let n=flags.length; let e=Math.min(n-1,startIdx+windowDays-1); let sum=0; for(let j=startIdx;j<=e;j++){sum+=(flags[j]||0) | (planned[j]||0);} return Math.max(0, maxDays - sum);}\n"
+        "function updateMetrics(){\n"
+        "  const w = worstWindow();\n"
+        "  document.getElementById('worst').textContent = `Worst 12-month: ${w} days`;\n"
+        "  document.getElementById('status').textContent = w>maxDays ? 'Status: NOT compliant' : 'Status: Compliant';\n"
+        "  const qs = document.getElementById('qstart').value;\n"
+        "  if(qs){ const d = new Date(qs); const idx = Math.floor((d - baseDate)/(24*3600*1000)); if(idx>=0){ const rem = remainingFrom(idx); document.getElementById('remaining').textContent = `Remaining from ${qs}: ${rem}`; } }\n"
+        "}\n"
+        "function applyClasses(){\n"
+        "  document.querySelectorAll('.cell[data-idx]').forEach(el => {\n"
+        "    const i = parseInt(el.getAttribute('data-idx'));\n"
+        "    const abroad = flags[i]===1;\n"
+        "    const plan = planned[i]===1;\n"
+        "    let cls = 'home';\n"
+        "    if(abroad){ cls = 'abroad'; } else if(plan){ cls = 'planned'; } else {\n"
+        "      const d = new Date(baseDate.getTime() + i*24*3600*1000);\n"
+        "      const now = new Date(); now.setHours(0,0,0,0);\n"
+        "      if(d > now){ cls = 'future'; }\n"
+        "    }\n"
+        "    el.className = 'cell ' + cls;\n"
+        "  });\n"
+        "}\n"
+        "document.addEventListener('click', (e)=>{\n"
+        "  const el = e.target.closest('.cell[data-idx]'); if(!el) return;\n"
+        "  const i = parseInt(el.getAttribute('data-idx'));\n"
+        "  if(flags[i]===1) return; // cannot toggle base abroad\n"
+        "  planned[i] = planned[i] ? 0 : 1;\n"
+        "  applyClasses(); updateMetrics();\n"
+        "});\n"
+        "document.getElementById('qstart').addEventListener('change', updateMetrics);\n"
+        "document.getElementById('addPlan').addEventListener('click', ()=>{\n"
+        "  const ps = document.getElementById('pstart').value; const pe = document.getElementById('pend').value; if(!ps||!pe) return;\n"
+        "  const ds = new Date(ps); const de = new Date(pe); if(de<ds) return;\n"
+        "  const startIdx = Math.max(0, Math.floor((ds - baseDate)/(24*3600*1000)));\n"
+        "  const endIdx = Math.min(flags.length-1, Math.floor((de - baseDate)/(24*3600*1000)));\n"
+        "  for(let i=startIdx;i<=endIdx;i++){ if(flags[i]!==1) planned[i]=1; }\n"
+        "  applyClasses(); updateMetrics();\n"
+        "});\n"
+        "document.getElementById('clearPlan').addEventListener('click', ()=>{\n"
+        "  planned.fill(0); applyClasses(); updateMetrics();\n"
+        "});\n"
+        "applyClasses(); updateMetrics();\n"
+    )
+    html_parts.append("</script>")
     html_parts.append("</body></html>")
 
     with open(out_path, "w", encoding="utf-8") as f:
