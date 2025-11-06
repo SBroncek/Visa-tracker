@@ -1,5 +1,5 @@
 # Visa-tracker
-Checks how many days abroad you have left to fulfil your visa conditions
+Checks how many days abroad you have left to fulfil your visa condition
 
 How to use
 1. Download and open abroad_days.html using your favourite browser

@@ -130,11 +130,12 @@ def check_abroad_days(
     assessment_period: Period,
     window_days: int = 365,
     max_allowed: int = 180,
-) -> Tuple[bool, List[Tuple[date, date, int]]]:
+) -> Tuple[bool, List[Tuple[date, date, int]], Optional[Tuple[date, date, int]]]:
     """Core check: whether any rolling window exceeds the maximum allowed abroad days.
 
-    Returns (is_compliant, violating_windows). Each violating window is returned as
-    (window_start_date, window_end_date, abroad_days_in_window).
+    Returns (is_compliant, violating_windows, worst_window). Each violating window is returned as
+    (window_start_date, window_end_date, abroad_days_in_window). The worst_window is the one with 
+    the most abroad days, or None if compliant.
     """
     # Clamp and merge trips to the assessment period first
     clamped = [t for t in (clamp_trip_to_period(t, assessment_period) for t in trips) if t]
@@ -147,7 +148,12 @@ def check_abroad_days(
     for si, ei, days_in_window in raw:
         humanized.append((base + timedelta(days=si), base + timedelta(days=ei), days_in_window))
 
-    return (len(humanized) == 0), humanized
+    # Find the worst window (highest abroad days)
+    worst_window = None
+    if humanized:
+        worst_window = max(humanized, key=lambda w: w[2])
+
+    return (len(humanized) == 0), humanized, worst_window
 
 
 # ---------- Visualization ----------
@@ -157,6 +163,7 @@ def render_terminal_grid(
     base_date: date,
     period_end: date,
     today: date,
+    worst_window: Optional[Tuple[date, date, int]] = None,
 ) -> None:
     """Render a simple month-by-month grid in the terminal.
 
@@ -169,6 +176,8 @@ def render_terminal_grid(
     RED = "\x1b[41m\x1b[30m"  # red bg, black text
     GREEN = "\x1b[42m\x1b[30m"
     BLACK = "\x1b[40m\x1b[37m"
+    YELLOW = "\x1b[43m\x1b[30m"  # yellow bg for worst window
+    BOLD = "\x1b[1m"
     RESET = "\x1b[0m"
 
     # Iterate months
@@ -204,6 +213,11 @@ def render_terminal_grid(
                 color = BLACK
             else:
                 color = RED if flags[idx] == 1 else GREEN
+            
+            # Highlight worst window period
+            if worst_window and worst_window[0] <= d <= worst_window[1]:
+                color = YELLOW
+            
             # print two-char day as colored block with day number
             print(f"{color}{d.day:02d}{RESET} ", end="")
             if d.weekday() == 6:  # Sunday -> newline
@@ -219,12 +233,23 @@ def render_html_grid(
     period_end: date,
     today: date,
     out_path: str,
+    worst_window: Optional[Tuple[date, date, int]] = None,
 ) -> None:
     """Write an HTML with rows per year and columns per month; each cell shows a mini calendar."""
 
     def cell_class(d: date) -> str:
         idx = (d - base_date).days
         is_abroad = flags[idx] == 1 if 0 <= idx < len(flags) else False
+        
+        # Check if this date is in the worst 12-month window
+        if worst_window and worst_window[0] <= d <= worst_window[1]:
+            if is_abroad:
+                return "abroad worst"  # abroad in worst window
+            elif d > today:
+                return "future worst"  # future in worst window
+            else:
+                return "home worst"  # home in worst window
+        
         if is_abroad:
             return "abroad"  # future abroad should still be red
         if d > today:
@@ -256,16 +281,17 @@ def render_html_grid(
         ".month{border:1px solid #eee;padding:4px;border-radius:4px;}\n"
         ".month-name{font-size:11px;color:#333;margin-bottom:2px;text-align:center;}\n"
         ".mini{display:grid;grid-template-columns:repeat(7,var(--size));grid-auto-rows:var(--size);gap:var(--gap);justify-content:center;}\n"
-        ".cell{width:var(--size);height:var(--size);}\n"
-        ".home{background:#2ecc71} .abroad{background:#e74c3c} .future{background:#d9d9d9} .planned{background:#f39c12} \n"
+        ".cell{width:var(--size);height:var(--size);box-sizing:border-box;position:relative;}\n"
+        ".home{background:#2ecc71} .abroad{background:#e74c3c} .future{background:#d9d9d9} .planned{background:#f39c12} .worst{border:2px solid #f1c40f} \n"
         ".empty{background:transparent} \n"
         ".months-header{display:grid;grid-template-columns:56px repeat(12, 1fr);gap:4px;margin-bottom:4px;color:#555;font-size:11px;}\n"
-        ".months-header div{ text-align:center }\n"
+        ".months-header div{ text-align:center; white-space:nowrap }\n"
         ".panel{margin:12px 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap;}\n"
         ".panel input[type=date]{padding:4px 6px} .panel .metric{font-size:13px;color:#333}\n"
         ".status-badge{padding:6px 10px;border-radius:999px;font-weight:700;color:#fff} \n"
         ".ok{background:#27ae60} .notok{background:#c0392b}\n"
         ".plans{margin:10px 0;} .plans h3{margin:8px 0 6px 0;font-size:14px} .plans table{border-collapse:collapse;width:100%;max-width:760px} .plans th,.plans td{border-bottom:1px solid #eee;padding:4px 6px;font-size:12px;text-align:left} .plans input[type=date]{padding:2px 4px;font-size:12px} .plans button{padding:4px 8px;font-size:12px}\n"
+        ".sw.worst{background:#f1c40f}\n"
         "</style>"
     )
     html_parts.append("</head><body>")
@@ -275,11 +301,13 @@ def render_html_grid(
                      "<span><span class='sw abroad'></span>Abroad (past/present)</span>"
                      "<span><span class='sw planned'></span>Abroad (future)</span>"
                      "<span><span class='sw future'></span>Future (home)</span>"
+                     "<span><span class='sw worst'></span>Worst 12-month period</span>"
                      "</div>")
     # Interaction panel
     html_parts.append("<div class='panel'>"
                      "<span id='status' class='status-badge ok'>COMPLIANT</span>"
                      "<span class='metric' id='worst'></span>"
+                     "<div style='width:100%'><small id='worstPeriod' class='metric'></small></div>"
                      "<label>Query start: <input id='qstart' type='date'></label>"
                      "<span class='metric' id='remaining'></span>"
                      "<label style='margin-left:12px'>Add trip: <input id='pstart' type='date'> – <input id='pend' type='date'></label>"
@@ -350,13 +378,15 @@ def render_html_grid(
         f"let flags = new Uint8Array([{flags_js}]);\n"
         f"let planned = new Uint8Array({total_days});\n"
         "let plannedRanges = []; let nextPlanId = 1;\n"
+        "function mergeRanges(ranges){ if(ranges.length===0) return []; ranges = ranges.slice().sort((a,b)=>a.startIdx-b.startIdx); const out=[{...ranges[0]}]; for(let k=1;k<ranges.length;k++){ const r=ranges[k]; const cur=out[out.length-1]; if(r.startIdx <= cur.endIdx + 1){ cur.endIdx = Math.max(cur.endIdx, r.endIdx); } else { out.push({...r}); } } return out; }\n"
         "function sumRange(arr, start, end){let s=0; for(let i=start;i<=end;i++){s+=arr[i]||0;} return s;}\n"
-        "function worstWindow(){let n=flags.length;let best=0; for(let i=0;i<n;i++){let e=Math.min(n-1,i+windowDays-1); let sum=0; for(let j=i;j<=e;j++){sum+=(flags[j]||0) | (planned[j]||0);} if(sum>best) best=sum;} return best;}\n"
-        "function remainingFrom(startIdx){let n=flags.length; let e=Math.min(n-1,startIdx+windowDays-1); let sum=0; for(let j=startIdx;j<=e;j++){sum+=(flags[j]||0) | (planned[j]||0);} return Math.max(0, maxDays - sum);}\n"
+        "function worstWindow(){let n=flags.length;let best=0;for(let i=0;i<n;i++){let e=Math.min(n-1,i+windowDays-1);let sum=0;for(let j=i;j<=e;j++){sum+=(flags[j]||0)|(planned[j]||0);}if(sum>best)best=sum;}return best;}\n"
+        "function bestWindowRange(){let n=flags.length;let best=-1,bStart=0,bEnd=-1;for(let i=0;i<n;i++){let e=Math.min(n-1,i+windowDays-1);let sum=0;for(let j=i;j<=e;j++){sum+=(flags[j]||0)|(planned[j]||0);}if(sum>best){best=sum;bStart=i;bEnd=e;}}return {start:bStart,end:bEnd,sum:best};}\n"
+         "function remainingFrom(startIdx){let n=flags.length; let e=Math.min(n-1,startIdx+windowDays-1); let sum=0; for(let j=startIdx;j<=e;j++){sum+=(flags[j]||0) | (planned[j]||0);} return Math.max(0, maxDays - sum);}\n"
         "function idxFromDate(d){ return Math.floor((d - baseDate)/(24*3600*1000)); }\n"
         "function dateFromIdx(i){ return new Date(baseDate.getTime() + i*24*3600*1000); }\n"
         "function ensureSizeForDate(d){ const need = idxFromDate(d)+1; if(need>flags.length){ const nf = new Uint8Array(need); nf.set(flags); flags = nf; const np = new Uint8Array(need); np.set(planned); planned = np; } }\n"
-        "function recalcPlannedFromRanges(){ planned.fill(0); for(const r of plannedRanges){ for(let i=r.startIdx;i<=r.endIdx;i++){ planned[i]=1; } } }\n"
+        "function recalcPlannedFromRanges(){ plannedRanges = mergeRanges(plannedRanges); planned.fill(0); for(const r of plannedRanges){ for(let i=r.startIdx;i<=r.endIdx;i++){ planned[i]=1; } } }\n"
         "function renderPlansTable(){ const tbody = document.querySelector('#plansTable tbody'); tbody.innerHTML=''; plannedRanges.sort((a,b)=>a.startIdx-b.startIdx); let i=1; for(const r of plannedRanges){ const tr=document.createElement('tr'); const sd = dateFromIdx(r.startIdx).toISOString().slice(0,10); const ed = dateFromIdx(r.endIdx).toISOString().slice(0,10); tr.innerHTML = `<td>${i}</td><td><input type='date' data-id='${r.id}' data-role='start' value='${sd}'></td><td><input type='date' data-id='${r.id}' data-role='end' value='${ed}'></td><td>${(r.endIdx-r.startIdx+1)}</td><td><button data-id='${r.id}' data-role='remove'>Remove</button></td>`; tbody.appendChild(tr); i++; } }\n"
         "function attachPlansTableHandlers(){ const tbody = document.querySelector('#plansTable tbody'); tbody.addEventListener('input', (e)=>{ const t=e.target; if(!(t instanceof HTMLInputElement)) return; const id=parseInt(t.getAttribute('data-id')); const role=t.getAttribute('data-role'); const val=t.value; const r = plannedRanges.find(x=>x.id===id); if(!r||!val) return; const d=new Date(val); if(role==='start'){ r.startIdx = Math.min(r.endIdx, Math.max(0, idxFromDate(d))); } else if(role==='end'){ r.endIdx = Math.max(r.startIdx, Math.max(0, idxFromDate(d))); } recalcPlannedFromRanges(); const lastYear = computeLastRelevantYear(); ensureRenderedUntil(lastYear); trimRenderedTo(lastYear); applyClasses(); updateMetrics(); renderPlansTable(); }); tbody.addEventListener('click',(e)=>{ const btn = e.target.closest('button[data-role=remove]'); if(!btn) return; const id=parseInt(btn.getAttribute('data-id')); plannedRanges = plannedRanges.filter(x=>x.id!==id); recalcPlannedFromRanges(); const lastYear = computeLastRelevantYear(); trimRenderedTo(lastYear); applyClasses(); updateMetrics(); renderPlansTable(); }); }\n"
         "function trimRenderedTo(year){ const outer = document.getElementById('outer'); let currentLast = parseInt(outer.getAttribute('data-last-year')); while(currentLast>year){\n"
@@ -366,16 +396,19 @@ def render_html_grid(
         "function buildMonth(y,m,name){ const first = new Date(y, m-1, 1); const next = new Date(y, m, 1); const last = new Date(next - 24*3600*1000); const month = document.createElement('div'); month.className='month'; const title = document.createElement('div'); title.className='month-name'; title.textContent=name; const mini = document.createElement('div'); mini.className='mini'; const offset = (first.getDay()+6)%7; for(let i=0;i<offset;i++){ const e=document.createElement('div'); e.className='cell empty'; mini.appendChild(e);} for(let d=new Date(first); d<=last; d.setDate(d.getDate()+1)){ const idx = idxFromDate(d); const cell=document.createElement('div'); cell.className='cell empty'; cell.setAttribute('title', d.toISOString().slice(0,10)); if(d>=baseDate){ cell.setAttribute('data-idx', String(idx)); } mini.appendChild(cell);} month.appendChild(title); month.appendChild(mini); return month;}\n"
         "function appendYear(y){ const outer = document.getElementById('outer'); const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; const yearDiv = document.createElement('div'); yearDiv.className='year'; yearDiv.textContent=String(y); outer.appendChild(yearDiv); for(let m=1;m<=12;m++){ outer.appendChild(buildMonth(y,m,months[m-1])); } }\n"
         "function ensureRenderedUntil(year){ const outer = document.getElementById('outer'); const currentLastYear = parseInt(outer.getAttribute('data-last-year')); if(year<=currentLastYear) return; for(let y=currentLastYear+1; y<=year; y++){ appendYear(y); } outer.setAttribute('data-last-year', String(year)); }\n"
-        "function computeLastRelevantYear(){ let last = -1; for(let i=0;i<flags.length;i++){ if( (flags[i]|planned[i])===1) last = i; } if(last<0) return Math.min(periodEnd.getFullYear(), new Date().getFullYear()); const d = dateFromIdx(last); return Math.max(Math.min(periodEnd.getFullYear(), new Date().getFullYear()), d.getFullYear()); }\n"
+        "function computeLastRelevantYear(){ let last = -1; for(let i=0;i<flags.length;i++){ if( (flags[i]|planned[i])===1) last = i; } if(last<0) return Math.min(periodEnd.getFullYear(), new Date().getFullYear()); const d = dateFromIdx(last); return Math.min(periodEnd.getFullYear(), d.getFullYear()); }\n"
+        "function fmt(d){return new Date(d).toISOString().slice(0,10);}\n"
         "function updateMetrics(){\n"
         "  const w = worstWindow();\n"
         "  document.getElementById('worst').textContent = `Worst 12-month: ${w} days`;\n"
         "  const badge = document.getElementById('status'); const notok = w>maxDays; badge.textContent = notok ? 'NOT COMPLIANT' : 'COMPLIANT'; badge.className = 'status-badge ' + (notok ? 'notok' : 'ok');\n"
         "  const qs = document.getElementById('qstart').value;\n"
         "  if(qs){ const d = new Date(qs); const idx = Math.floor((d - baseDate)/(24*3600*1000)); if(idx>=0){ const rem = remainingFrom(idx); document.getElementById('remaining').textContent = `Remaining from ${qs}: ${rem}`; } }\n"
+        "  const r = bestWindowRange(); if(r.sum>0){ const s = new Date(baseDate.getTime()+r.start*24*3600*1000); const e = new Date(baseDate.getTime()+r.end*24*3600*1000); const el = document.getElementById('worstPeriod'); if(el){ el.textContent = `Worst period: ${fmt(s)} to ${fmt(e)}`; } }\n"
         "}\n"
         "function applyClasses(){\n"
         "  const now = new Date(); now.setHours(0,0,0,0);\n"
+        "  const r = bestWindowRange();\n"
         "  document.querySelectorAll('.cell[data-idx]').forEach(el => {\n"
         "    const i = parseInt(el.getAttribute('data-idx'));\n"
         "    const abroad = (flags[i]||0)===1;\n"
@@ -387,7 +420,8 @@ def render_html_grid(
         "    } else {\n"
         "      if(d > now){ cls = 'future'; }\n"
         "    }\n"
-        "    el.className = 'cell ' + cls;\n"
+        "    const inWorst = (r.sum>0 && i>=r.start && i<=r.end);\n"
+        "    el.className = 'cell ' + cls + (inWorst ? ' worst' : '');\n"
         "  });\n"
         "}\n"
         "function resizeCells(){ const outer = document.getElementById('outer'); const yearCol = 56; const gap = 4; const available = Math.max(0, outer.clientWidth - yearCol - (12-1)*gap); const monthWidth = Math.max(80, Math.floor(available/12)); const size = Math.max(8, Math.min(18, Math.floor((monthWidth - 8 - (7-1)*1)/7))); document.documentElement.style.setProperty('--size', size + 'px'); }\n"
@@ -616,17 +650,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if planned is not None:
         trips = list(trips) + [planned]
 
-    is_ok, violations = check_abroad_days(
+    is_ok, violations, worst_window = check_abroad_days(
         trips=trips,
         assessment_period=period,
         window_days=args.window_days,
         max_allowed=args.max_days,
     )
 
-    if is_ok:
-        print("Compliant: No 12-month window exceeds the allowed abroad days.")
-    else:
-        print("NOT compliant: Some 12-month windows exceed the allowed abroad days.")
+    print("Compliant:" + (" YES" if is_ok else " \033[91mNOT compliant\033[0m"))
+    if worst_window:
+        start, end, days = worst_window
+        print(f"\033[93m\033[1mWorst 12-month window: {start} to {end} ({days} abroad days)\033[0m")
+    if not is_ok:
         # Show up to 10 violating windows, with the worst first
         violations_sorted = sorted(violations, key=lambda w: w[2], reverse=True)
         limit = min(10, len(violations_sorted))
@@ -657,13 +692,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         flags, base = build_abroad_day_flags(merged, period)
         today = date.today()
         if args.visualize == "terminal":
-            render_terminal_grid(flags, base, period[1], today)
+            render_terminal_grid(flags, base, period[1], today, worst_window)
         elif args.visualize == "html":
             # Overwrite default output by default; only uniquify when a custom name is given and --overwrite is not set
             desired = args.html_out
             if desired != "abroad_days.html" and not args.overwrite:
                 desired = ensure_unique_path(desired)
-            render_html_grid(flags, base, period[1], today, desired)
+            render_html_grid(flags, base, period[1], today, desired, worst_window)
             print(f"Wrote HTML visualization to {desired}")
             if args.open_html:
                 try:
